@@ -1,33 +1,58 @@
+# Byte-compiled / cache
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-build/
-dist/
-*.egg-info/
-.eggs/
 
+# Virtual environments
 .venv/
 venv/
 env/
 ENV/
 
-.env
-.env.local
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Linting
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+
+# Databases
 *.db
 *.sqlite
 *.sqlite3
 
-.pytest_cache/
-.coverage
-htmlcov/
-.ruff_cache/
-.mypy_cache/
+# Environment
+.env
+.env.*
+!.env.example
 
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
 Thumbs.db
-.idea/
-.vscode/
 
+# Logs
 *.log
+logs/
+
+# Local scratch
+scratch/
+tmp/

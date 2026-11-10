@@ -4,32 +4,30 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: nigrani
-      POSTGRES_PASSWORD: nigrani
+      POSTGRES_PASSWORD: nigrani_dev_password
       POSTGRES_DB: nigrani
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nigrani -d nigrani"]
       interval: 5s
-      timeout: 5s
+      timeout: 3s
       retries: 10
     ports:
       - "5432:5432"
 
-  api:
+  app:
     build: .
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      ENVIRONMENT: production
-      DEBUG: "false"
-      DATABASE_URL: postgresql+psycopg://nigrani:nigrani@db:5432/nigrani
-      SECRET_KEY: ${SECRET_KEY:-change-me-in-production-please}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000}
-      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@nigrani.dev}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe123!}
+      DATABASE_URL: postgresql+psycopg://nigrani:nigrani_dev_password@db:5432/nigrani
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-this-before-deploying}
+      JWT_TTL_MINUTES: "720"
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
     ports:
       - "8000:8000"
 

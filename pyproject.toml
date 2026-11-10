@@ -5,53 +5,61 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nigrani"
 version = "1.0.0"
-description = "Nigrani — predictive maintenance and RPA control plane for factory machinery"
+description = "Predictive maintenance for factory machinery — deterministic health index, degradation rate and remaining useful life."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "ABraz Baloch", email = "mohdabrarbaloch@gmail.com" }]
-keywords = ["predictive-maintenance", "rpa", "fastapi", "industrial-iot", "reliability"]
+authors = [{ name = "Abrar Baloch" }]
+keywords = ["predictive-maintenance", "iot", "manufacturing", "fastapi", "reliability"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Framework :: FastAPI",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering",
+]
 
 dependencies = [
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
-    "sqlalchemy>=2.0.30",
-    "pydantic>=2.7.0",
-    "pydantic-settings>=2.3.0",
-    "pyjwt>=2.8.0",
-    "bcrypt>=4.1.0",
-    "python-multipart>=0.0.9",
-    "email-validator>=2.1.0",
+  "fastapi>=0.115,<1.0",
+  "uvicorn[standard]>=0.30,<1.0",
+  "sqlalchemy>=2.0,<3.0",
+  "pydantic[email]>=2.7,<3.0",
+  "bcrypt>=4.1,<5.0",
+  "pyjwt>=2.8,<3.0",
+  "slowapi>=0.1.9,<1.0",
+  "python-multipart>=0.0.9",
+  "psycopg[binary]>=3.1,<4.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.2.0",
-    "pytest-cov>=5.0.0",
-    "httpx>=0.27.0",
-    "ruff>=0.5.0",
-    "black>=24.4.0",
+  "pytest>=8.0,<9.0",
+  "httpx>=0.27,<1.0",
+  "ruff>=0.5,<1.0",
+  "black>=24.0,<25.0",
 ]
-
-[project.urls]
-Homepage = "https://github.com/mohdabrarbaloch-arch/day-17-nigrani"
-Repository = "https://github.com/mohdabrarbaloch-arch/day-17-nigrani"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
 
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["B008"]
-
-[tool.black]
-line-length = 100
-target-version = ["py311"]
+[tool.setuptools.package-data]
+app = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --strict-markers"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = ["B008"]  # FastAPI Depends() in defaults is the documented pattern
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.black]
+line-length = 110
+target-version = ["py311"]
