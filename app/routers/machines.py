@@ -1,138 +1,368 @@
-"""Plants and machines."""
+"""Machine CRUD, telemetry ingestion, health evaluation and maintenance logs.
+
+The interesting endpoint is POST /{id}/readings: it stores the sample, runs the
+engine, and raises or clears an alert in the same transaction. That way the
+dashboard never shows a reading without the verdict that belongs to it.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.database import get_db
-from app.deps import get_current_user
-from app.engine.health import estimate_rul, score_health
-from app.models import Alert, Machine, Plant, Reading, User, WorkOrder, WorkOrderStatus
-from app.schemas import MachineCreate, MachineDetail, MachineOut, PlantCreate, PlantOut
-from app.timeutil import days_between
+from .. import engine
+from ..db import get_db
+from ..models import Alert, Machine, MaintenanceLog, Reading, User
+from ..schemas import (
+    ChannelOut,
+    HealthOut,
+    MachineCreate,
+    MachineOut,
+    MaintenanceCreate,
+    MaintenanceOut,
+    ReadingIn,
+    ReadingOut,
+)
+from ..security import current_user
 
-router = APIRouter(prefix="/api", tags=["machines"])
-
-
-@router.post("/plants", response_model=PlantOut, status_code=status.HTTP_201_CREATED)
-def create_plant(
-    payload: PlantCreate,
-    db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
-) -> PlantOut:
-    plant = Plant(name=payload.name, city=payload.city)
-    db.add(plant)
-    db.commit()
-    db.refresh(plant)
-    return PlantOut.model_validate(plant)
+router = APIRouter(prefix="/api/machines", tags=["machines"])
 
 
-@router.get("/plants", response_model=list[PlantOut])
-def list_plants(
-    db: Session = Depends(get_db), _user: User = Depends(get_current_user)
-) -> list[PlantOut]:
-    plants = db.scalars(select(Plant).order_by(Plant.name)).all()
-    return [PlantOut.model_validate(p) for p in plants]
+def _owned(machine_id: int, user: User, db: Session) -> Machine:
+    machine = db.get(Machine, machine_id)
+    if machine is None or machine.owner_id != user.id:
+        # 404 rather than 403: do not confirm that someone else's machine exists.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Machine not found")
+    return machine
 
 
-@router.post("/machines", response_model=MachineOut, status_code=status.HTTP_201_CREATED)
+def _nominal(m: Machine) -> tuple[float, float, float]:
+    return (m.nominal_vibration, m.nominal_temperature, m.nominal_current)
+
+
+def _critical(m: Machine) -> tuple[float, float, float]:
+    return (m.critical_vibration, m.critical_temperature, m.critical_current)
+
+
+def _report_for(machine: Machine, readings: list[Reading]) -> engine.HealthReport | None:
+    if not readings:
+        return None
+    rows = [(r.recorded_at, r.vibration_rms, r.temperature_c, r.current_a) for r in readings]
+    return engine.evaluate(rows, _nominal(machine), _critical(machine))
+
+
+def _health_out(machine: Machine, readings: list[Reading]) -> HealthOut:
+    report = _report_for(machine, readings)
+    if report is None:
+        return HealthOut(
+            machine_id=machine.id,
+            asset_tag=machine.asset_tag,
+            name=machine.name,
+            line=machine.line,
+            health=100.0,
+            worst_channel="none",
+            degradation_per_hour=None,
+            rul_hours=None,
+            severity=None,
+            reason="No telemetry yet — health is unknown, shown as 100 until the first reading.",
+            channels=[],
+            reading_count=0,
+        )
+    return HealthOut(
+        machine_id=machine.id,
+        asset_tag=machine.asset_tag,
+        name=machine.name,
+        line=machine.line,
+        health=report.health,
+        worst_channel=report.worst_channel,
+        degradation_per_hour=report.degradation_per_hour,
+        rul_hours=report.rul_hours,
+        severity=report.severity,
+        reason=report.reason,
+        channels=[
+            ChannelOut(
+                name=c.name,
+                value=c.value,
+                nominal=c.nominal,
+                critical=c.critical,
+                score=round(c.score, 4),
+                weight=c.weight,
+            )
+            for c in report.channels
+        ],
+        reading_count=len(readings),
+    )
+
+
+@router.post("", response_model=MachineOut, status_code=status.HTTP_201_CREATED)
 def create_machine(
     payload: MachineCreate,
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
-) -> MachineOut:
-    if db.get(Plant, payload.plant_id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plant not found")
+) -> Machine:
+    clash = db.scalar(
+        select(Machine).where(Machine.owner_id == user.id, Machine.asset_tag == payload.asset_tag)
+    )
+    if clash is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Asset tag {payload.asset_tag!r} is already in use")
 
-    if db.scalar(select(Machine).where(Machine.asset_tag == payload.asset_tag)) is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Asset tag already registered"
-        )
+    for nominal, critical, label in (
+        (payload.nominal_vibration, payload.critical_vibration, "vibration"),
+        (payload.nominal_temperature, payload.critical_temperature, "temperature"),
+        (payload.nominal_current, payload.critical_current, "current"),
+    ):
+        if critical <= nominal:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"critical_{label} must exceed nominal_{label}",
+            )
 
-    machine = Machine(**payload.model_dump())
+    machine = Machine(owner_id=user.id, **payload.model_dump())
     db.add(machine)
     db.commit()
     db.refresh(machine)
-    return MachineOut.model_validate(machine)
+    return machine
 
 
-@router.get("/machines", response_model=list[MachineOut])
+@router.get("", response_model=list[MachineOut])
 def list_machines(
-    plant_id: int | None = None,
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
-) -> list[MachineOut]:
-    stmt = select(Machine).order_by(Machine.name)
-    if plant_id is not None:
-        stmt = stmt.where(Machine.plant_id == plant_id)
-    machines = db.scalars(stmt).all()
-    return [MachineOut.model_validate(m) for m in machines]
+) -> list[Machine]:
+    return list(db.scalars(select(Machine).where(Machine.owner_id == user.id).order_by(Machine.asset_tag)))
 
 
-@router.get("/machines/{machine_id}", response_model=MachineDetail)
+@router.get("/{machine_id}", response_model=MachineOut)
 def get_machine(
     machine_id: int,
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
-) -> MachineDetail:
-    machine = db.get(Machine, machine_id)
-    if machine is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Machine not found")
+) -> Machine:
+    return _owned(machine_id, user, db)
 
-    detail = MachineDetail.model_validate(machine)
 
-    latest = db.scalar(
-        select(Reading)
-        .where(Reading.machine_id == machine_id)
-        .order_by(Reading.recorded_at.desc())
-        .limit(1)
+@router.delete("/{machine_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_machine(
+    machine_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    machine = _owned(machine_id, user, db)
+    db.delete(machine)
+    db.commit()
+
+
+@router.post("/{machine_id}/readings", response_model=HealthOut, status_code=status.HTTP_201_CREATED)
+def add_reading(
+    machine_id: int,
+    payload: ReadingIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> HealthOut:
+    machine = _owned(machine_id, user, db)
+
+    recorded_at = payload.recorded_at or datetime.now(UTC)
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=UTC)
+
+    # Score this sample on its own first so the stored row carries its health.
+    single = engine.evaluate(
+        [(recorded_at, payload.vibration_rms, payload.temperature_c, payload.current_a)],
+        _nominal(machine),
+        _critical(machine),
     )
-    if latest is not None:
-        result = score_health(
-            vibration_rms=latest.vibration_rms,
-            temperature_c=latest.temperature_c,
-            current_a=latest.current_a,
-            runtime_hours=latest.runtime_hours,
-            baseline_vibration=machine.baseline_vibration,
-            baseline_temperature=machine.baseline_temperature,
-            baseline_current=machine.baseline_current,
-            power_class=machine.power_class,
-        )
-        detail.health_index = result.health_index
-        detail.vibration_zone = result.vibration_zone
 
-        history = db.scalars(
+    reading = Reading(
+        machine_id=machine.id,
+        recorded_at=recorded_at,
+        vibration_rms=payload.vibration_rms,
+        temperature_c=payload.temperature_c,
+        current_a=payload.current_a,
+        health=single.health,
+    )
+    db.add(reading)
+    db.flush()
+
+    history = list(
+        db.scalars(
             select(Reading)
-            .where(Reading.machine_id == machine_id)
+            .where(Reading.machine_id == machine.id)
             .order_by(Reading.recorded_at.desc())
-            .limit(20)
-        ).all()
-        if len(history) >= 3:
-            newest = history[0].recorded_at
-            series = [(days_between(newest, r.recorded_at), r.health_index) for r in history]
-            rul = estimate_rul(series)
-            detail.rul_days = rul.days_remaining
-            detail.rul_confidence = rul.confidence
+            .limit(engine.TREND_WINDOW)
+        )
+    )
+    history.reverse()
 
-    detail.open_alerts = (
-        db.scalar(
-            select(func.count(Alert.id)).where(
-                Alert.machine_id == machine_id, Alert.acknowledged.is_(False)
-            )
-        )
-        or 0
+    report = _report_for(machine, history)
+    assert report is not None  # we just inserted one
+
+    _sync_alert(machine, report, db)
+
+    db.commit()
+    return _health_out(machine, history)
+
+
+def _sync_alert(machine: Machine, report: engine.HealthReport, db: Session) -> None:
+    """Raise an alert if needed, and clear stale ones.
+
+    One open alert per severity. If the machine recovers above the warning
+    band, every open alert is auto-resolved with a note saying so — a stale
+    red banner is worse than no banner.
+    """
+    open_alerts = list(
+        db.scalars(select(Alert).where(Alert.machine_id == machine.id, Alert.resolved_at.is_(None)))
     )
-    detail.open_work_orders = (
-        db.scalar(
-            select(func.count(WorkOrder.id)).where(
-                WorkOrder.machine_id == machine_id,
-                WorkOrder.status.in_(
-                    [WorkOrderStatus.OPEN, WorkOrderStatus.ASSIGNED, WorkOrderStatus.IN_PROGRESS]
-                ),
-            )
+
+    if report.severity is None:
+        for alert in open_alerts:
+            alert.resolved_at = datetime.now(UTC)
+            alert.resolved_note = f"Auto-resolved: health recovered to {report.health:.1f}."
+        return
+
+    same = [a for a in open_alerts if a.severity == report.severity]
+    if same:
+        # Refresh the numbers on the existing alert instead of stacking a new one.
+        same[0].health_at_alert = report.health
+        same[0].rul_hours = report.rul_hours
+        same[0].reason = report.reason or same[0].reason
+        return
+
+    # Severity changed — close the older, lower-severity ones.
+    for alert in open_alerts:
+        alert.resolved_at = datetime.now(UTC)
+        alert.resolved_note = f"Superseded by a {report.severity} alert."
+
+    db.add(
+        Alert(
+            machine_id=machine.id,
+            severity=report.severity,
+            reason=report.reason or "Health below threshold",
+            health_at_alert=report.health,
+            rul_hours=report.rul_hours,
         )
-        or 0
     )
-    return detail
+
+
+@router.get("/{machine_id}/health", response_model=HealthOut)
+def machine_health(
+    machine_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> HealthOut:
+    machine = _owned(machine_id, user, db)
+    readings = list(
+        db.scalars(
+            select(Reading)
+            .where(Reading.machine_id == machine.id)
+            .order_by(Reading.recorded_at.desc())
+            .limit(engine.TREND_WINDOW)
+        )
+    )
+    readings.reverse()
+    return _health_out(machine, readings)
+
+
+@router.get("/{machine_id}/readings", response_model=list[ReadingOut])
+def list_readings(
+    machine_id: int,
+    limit: int = Query(default=100, ge=1, le=1000),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[Reading]:
+    machine = _owned(machine_id, user, db)
+    rows = list(
+        db.scalars(
+            select(Reading)
+            .where(Reading.machine_id == machine.id)
+            .order_by(Reading.recorded_at.desc())
+            .limit(limit)
+        )
+    )
+    rows.reverse()
+    return rows
+
+
+@router.get("/{machine_id}/forecast")
+def forecast(
+    machine_id: int,
+    hours: int = Query(default=72, ge=1, le=720),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Projected health curve at the current degradation rate.
+
+    This is a straight-line projection, not a model. It is labelled as such in
+    the UI because a curve that looks predictive but is not is worse than no
+    curve at all.
+    """
+    machine = _owned(machine_id, user, db)
+    readings = list(
+        db.scalars(
+            select(Reading)
+            .where(Reading.machine_id == machine.id)
+            .order_by(Reading.recorded_at.desc())
+            .limit(engine.TREND_WINDOW)
+        )
+    )
+    readings.reverse()
+    report = _report_for(machine, readings)
+    if report is None:
+        return {"machine_id": machine.id, "points": [], "note": "No telemetry yet."}
+
+    step = max(1, hours // 24)
+    points = [
+        {
+            "hours_ahead": h,
+            "health": engine.project_health(report.health, report.degradation_per_hour, h),
+        }
+        for h in range(0, hours + 1, step)
+    ]
+    return {
+        "machine_id": machine.id,
+        "asset_tag": machine.asset_tag,
+        "current_health": report.health,
+        "degradation_per_hour": report.degradation_per_hour,
+        "rul_hours": report.rul_hours,
+        "points": points,
+        "note": "Straight-line projection at the current rate. Not a trained forecast.",
+    }
+
+
+@router.post("/{machine_id}/maintenance", response_model=MaintenanceOut, status_code=status.HTTP_201_CREATED)
+def log_maintenance(
+    machine_id: int,
+    payload: MaintenanceCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> MaintenanceLog:
+    machine = _owned(machine_id, user, db)
+    log = MaintenanceLog(
+        machine_id=machine.id,
+        action=payload.action,
+        notes=payload.notes,
+        downtime_minutes=payload.downtime_minutes,
+        performed_by=user.display_name,
+    )
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+@router.get("/{machine_id}/maintenance", response_model=list[MaintenanceOut])
+def list_maintenance(
+    machine_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[MaintenanceLog]:
+    machine = _owned(machine_id, user, db)
+    return list(
+        db.scalars(
+            select(MaintenanceLog)
+            .where(MaintenanceLog.machine_id == machine.id)
+            .order_by(MaintenanceLog.performed_at.desc())
+        )
+    )
