@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nigrani
+      POSTGRES_PASSWORD: nigrani
+      POSTGRES_DB: nigrani
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nigrani -d nigrani"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      DATABASE_URL: postgresql+psycopg://nigrani:nigrani@db:5432/nigrani
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production-please}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@nigrani.dev}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe123!}
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:
