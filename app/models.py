@@ -1,9 +1,12 @@
-"""ORM models for Nigrani."""
+"""Database models for Nigrani.
+
+SQLAlchemy 2.0 typed style. SQLite by default, PostgreSQL when DATABASE_URL
+points at one — the same code runs on both.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import StrEnum
 
 from sqlalchemy import (
     Boolean,
@@ -14,35 +17,17 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from app.database import Base
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-class MachineStatus(StrEnum):
-    RUNNING = "running"
-    IDLE = "idle"
-    MAINTENANCE = "maintenance"
-    FAULT = "fault"
-
-
-class AlertSeverity(StrEnum):
-    INFO = "info"
-    WARNING = "warning"
-    CRITICAL = "critical"
-
-
-class WorkOrderStatus(StrEnum):
-    OPEN = "open"
-    ASSIGNED = "assigned"
-    IN_PROGRESS = "in_progress"
-    DONE = "done"
-    CANCELLED = "cancelled"
+class Base(DeclarativeBase):
+    pass
 
 
 class User(Base):
@@ -50,106 +35,98 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    full_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(32), default="engineer", nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False, default="Engineer")
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="engineer")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-
-class Plant(Base):
-    __tablename__ = "plants"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    city: Mapped[str] = mapped_column(String(80), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-    machines: Mapped[list[Machine]] = relationship(back_populates="plant")
+    machines: Mapped[list[Machine]] = relationship(back_populates="owner", cascade="all, delete-orphan")
 
 
 class Machine(Base):
+    """A physical asset being monitored.
+
+    `nominal_*` is what the machine reads when it is healthy. `critical_*` is
+    where it is considered failed. Both are per-machine because a 3-phase
+    compressor and a small pump do not share a scale.
+    """
+
     __tablename__ = "machines"
+    __table_args__ = (UniqueConstraint("owner_id", "asset_tag", name="uq_machine_owner_tag"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    plant_id: Mapped[int] = mapped_column(ForeignKey("plants.id"), nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    asset_tag: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    machine_type: Mapped[str] = mapped_column(String(64), default="pump", nullable=False)
-    # ISO 10816-3 power class: 1 = small (<15 kW), 2 = medium (15-75 kW), 3 = large (>75 kW)
-    power_class: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
-    status: Mapped[str] = mapped_column(String(24), default=MachineStatus.RUNNING, nullable=False)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    asset_tag: Mapped[str] = mapped_column(String(60), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    line: Mapped[str] = mapped_column(String(80), nullable=False, default="Line A")
+    machine_type: Mapped[str] = mapped_column(String(60), nullable=False, default="pump")
 
-    # Baseline established at commissioning — every deviation is measured against this.
-    baseline_vibration: Mapped[float] = mapped_column(Float, default=2.8, nullable=False)
-    baseline_temperature: Mapped[float] = mapped_column(Float, default=62.0, nullable=False)
-    baseline_current: Mapped[float] = mapped_column(Float, default=10.0, nullable=False)
+    nominal_vibration: Mapped[float] = mapped_column(Float, default=2.0)
+    critical_vibration: Mapped[float] = mapped_column(Float, default=11.0)
+    nominal_temperature: Mapped[float] = mapped_column(Float, default=45.0)
+    critical_temperature: Mapped[float] = mapped_column(Float, default=95.0)
+    nominal_current: Mapped[float] = mapped_column(Float, default=12.0)
+    critical_current: Mapped[float] = mapped_column(Float, default=22.0)
 
-    runtime_hours: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    plant: Mapped[Plant] = relationship(back_populates="machines")
+    owner: Mapped[User] = relationship(back_populates="machines")
     readings: Mapped[list[Reading]] = relationship(
-        back_populates="machine", cascade="all, delete-orphan"
+        back_populates="machine", cascade="all, delete-orphan", order_by="Reading.recorded_at"
     )
+    alerts: Mapped[list[Alert]] = relationship(back_populates="machine", cascade="all, delete-orphan")
 
 
 class Reading(Base):
+    """One telemetry sample. Three channels, one timestamp."""
+
     __tablename__ = "readings"
     __table_args__ = (Index("ix_readings_machine_time", "machine_id", "recorded_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), nullable=False)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id", ondelete="CASCADE"), index=True)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     vibration_rms: Mapped[float] = mapped_column(Float, nullable=False)
     temperature_c: Mapped[float] = mapped_column(Float, nullable=False)
     current_a: Mapped[float] = mapped_column(Float, nullable=False)
-    runtime_hours: Mapped[float] = mapped_column(Float, nullable=False)
-    health_index: Mapped[float] = mapped_column(Float, nullable=False)
-    recorded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, nullable=False
-    )
+    health: Mapped[float] = mapped_column(Float, nullable=False)
 
     machine: Mapped[Machine] = relationship(back_populates="readings")
 
 
 class Alert(Base):
+    """An alert raised by the engine.
+
+    One open alert per (machine, severity) at a time, so a degrading bearing
+    does not page someone every minute.
+    """
+
     __tablename__ = "alerts"
+    __table_args__ = (Index("ix_alerts_machine_open", "machine_id", "resolved_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), nullable=False, index=True)
-    severity: Mapped[str] = mapped_column(String(16), nullable=False)
-    title: Mapped[str] = mapped_column(String(200), nullable=False)
-    detail: Mapped[str] = mapped_column(Text, nullable=False)
-    health_index: Mapped[float] = mapped_column(Float, nullable=False)
-    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id", ondelete="CASCADE"), index=True)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    health_at_alert: Mapped[float] = mapped_column(Float, nullable=False)
+    rul_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raised_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    machine: Mapped[Machine] = relationship(back_populates="alerts")
 
 
-class WorkOrder(Base):
-    __tablename__ = "work_orders"
+class MaintenanceLog(Base):
+    """What a human actually did, and when. Closes the loop on an alert."""
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id"), nullable=False, index=True)
-    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id"), nullable=True)
-    title: Mapped[str] = mapped_column(String(200), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
-    priority: Mapped[str] = mapped_column(String(16), default="medium", nullable=False)
-    status: Mapped[str] = mapped_column(String(24), default=WorkOrderStatus.OPEN, nullable=False)
-    assigned_to: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    created_by: Mapped[str] = mapped_column(String(32), default="rpa", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class AutomationLog(Base):
-    """Every automated decision, written down. This is the audit trail."""
-
-    __tablename__ = "automation_logs"
+    __tablename__ = "maintenance_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    runbook: Mapped[str] = mapped_column(String(80), nullable=False)
-    machine_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    action: Mapped[str] = mapped_column(String(120), nullable=False)
-    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
-    detail: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    machine_id: Mapped[int] = mapped_column(ForeignKey("machines.id", ondelete="CASCADE"), index=True)
+    performed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    action: Mapped[str] = mapped_column(String(200), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    downtime_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    performed_by: Mapped[str] = mapped_column(String(120), nullable=False, default="engineer")
