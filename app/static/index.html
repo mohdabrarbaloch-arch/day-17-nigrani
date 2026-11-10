@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Nigrani — Predictive Maintenance</title>
+<meta name="description" content="Predictive maintenance for factory machinery. Deterministic health index, degradation rate and remaining useful life — every number traceable to a reading." />
+<meta name="theme-color" content="#0b0f14" />
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+<!-- ── Auth gate ─────────────────────────────────────────────── -->
+<div id="gate" class="gate">
+  <div class="gate-card">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M3 17l4-6 3 3 4-7 3 4 4-5"/>
+          <circle cx="7" cy="11" r="1.4" fill="currentColor" stroke="none"/>
+          <circle cx="14" cy="7" r="1.4" fill="currentColor" stroke="none"/>
+        </svg>
+      </span>
+      <div>
+        <h1>Nigrani</h1>
+        <p class="tagline">نگہرانی · predictive maintenance</p>
+      </div>
+    </div>
+
+    <p class="gate-copy">
+      Watch a machine's vibration, temperature and current. Get a health index you can
+      argue with, a degradation rate, and how many hours are left before it fails.
+    </p>
+
+    <div class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="login" role="tab" aria-selected="true">Sign in</button>
+      <button class="tab" data-tab="register" role="tab" aria-selected="false">Create account</button>
+    </div>
+
+    <form id="login-form" class="stack" autocomplete="on">
+      <label>Email<input type="email" name="email" required placeholder="you@plant.pk" autocomplete="username" /></label>
+      <label>Password<input type="password" name="password" required minlength="8" placeholder="••••••••" autocomplete="current-password" /></label>
+      <button class="btn btn-primary" type="submit">Sign in</button>
+    </form>
+
+    <form id="register-form" class="stack is-hidden" autocomplete="on">
+      <label>Name<input type="text" name="display_name" required placeholder="Abrar Baloch" autocomplete="name" /></label>
+      <label>Email<input type="email" name="email" required placeholder="you@plant.pk" autocomplete="username" /></label>
+      <label>Password<input type="password" name="password" required minlength="8" placeholder="At least 8 characters" autocomplete="new-password" /></label>
+      <button class="btn btn-primary" type="submit">Create account</button>
+    </form>
+
+    <p id="gate-error" class="error" role="alert" hidden></p>
+    <p class="gate-foot">Demo data is seeded on first sign-up so the dashboard is never empty.</p>
+  </div>
+</div>
+
+<!-- ── App ───────────────────────────────────────────────────── -->
+<div id="app" class="app is-hidden">
+  <header class="topbar">
+    <div class="brand brand-sm">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M3 17l4-6 3 3 4-7 3 4 4-5"/>
+        </svg>
+      </span>
+      <div><h1>Nigrani</h1><p class="tagline" id="whoami">—</p></div>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn btn-ghost" id="seed-btn" title="Add 24 hours of synthetic telemetry to every machine">Simulate 24h</button>
+      <button class="btn btn-ghost" id="logout-btn">Sign out</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="kpis" id="kpis" aria-label="Fleet summary"></section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Fleet</h2>
+        <span class="hint">Health is a weighted blend of vibration, temperature and current — pulled toward the worst channel.</span>
+      </div>
+      <div id="fleet" class="fleet"></div>
+    </section>
+
+    <section class="panel" id="detail-panel" hidden>
+      <div class="panel-head">
+        <h2 id="detail-title">Machine</h2>
+        <button class="btn btn-ghost btn-sm" id="close-detail">Close</button>
+      </div>
+      <div id="detail" class="detail"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Open alerts</h2>
+        <span class="hint">One open alert per severity. Auto-resolves when health recovers.</span>
+      </div>
+      <div id="alerts" class="alerts"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Add a machine</h2></div>
+      <form id="machine-form" class="grid-form">
+        <label>Asset tag<input name="asset_tag" required placeholder="PMP-104" maxlength="60" /></label>
+        <label>Name<input name="name" required placeholder="Cooling water pump" maxlength="160" /></label>
+        <label>Line<input name="line" value="Line A" maxlength="80" /></label>
+        <label>Type
+          <select name="machine_type">
+            <option value="pump">Pump</option>
+            <option value="compressor">Compressor</option>
+            <option value="motor">Motor</option>
+            <option value="conveyor">Conveyor</option>
+            <option value="fan">Fan</option>
+          </select>
+        </label>
+        <label>Nominal vibration (mm/s)<input name="nominal_vibration" type="number" step="0.1" value="2.0" min="0" /></label>
+        <label>Critical vibration (mm/s)<input name="critical_vibration" type="number" step="0.1" value="11.0" min="0.1" /></label>
+        <label>Nominal temp (°C)<input name="nominal_temperature" type="number" step="0.1" value="45" /></label>
+        <label>Critical temp (°C)<input name="critical_temperature" type="number" step="0.1" value="95" /></label>
+        <label>Nominal current (A)<input name="nominal_current" type="number" step="0.1" value="12" min="0" /></label>
+        <label>Critical current (A)<input name="critical_current" type="number" step="0.1" value="22" min="0.1" /></label>
+        <div class="grid-form-actions">
+          <button class="btn btn-primary" type="submit">Add machine</button>
+        </div>
+      </form>
+      <p id="machine-error" class="error" role="alert" hidden></p>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Nigrani v1.0.0 · deterministic engine, no trained weights</span>
+    <span>Day 17 / 30 — built by Abrar Baloch</span>
+  </footer>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
